@@ -1,1193 +1,1263 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-from io import BytesIO
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.dml.color import RGBColor
+from openai import OpenAI
 
-# ---------------------------------------------------------
-# PAGE CONFIGURATION
-# ---------------------------------------------------------
+import io
+import json
+import re
+
+
+# =========================================================
+# PAGE CONFIG
+# =========================================================
 
 st.set_page_config(
-    page_title="DataGuard AI",
-    page_icon="🤖",
+    page_title="SlideGuard AI",
+    page_icon="🛡️",
     layout="wide"
 )
 
-# ---------------------------------------------------------
-# TITLE
-# ---------------------------------------------------------
 
-st.title("🤖 DataGuard AI")
-st.subheader("AI-Powered Data Quality & Cleaning Assistant")
-st.caption("Developed by Aliya Banu A | MBA – Business Analytics")
-st.write(
-    "Upload a CSV or Excel dataset to detect data-quality problems, "
-    "clean the data, analyze it and generate recommendations."
-)
+# =========================================================
+# CUSTOM CSS
+# =========================================================
 
-# ---------------------------------------------------------
-# FILE UPLOAD
-# ---------------------------------------------------------
+st.markdown("""
+<style>
 
-uploaded_file = st.file_uploader(
-    "📂 Upload your dataset",
-    type=["csv", "xlsx"]
-)
+.main-title {
+    font-size: 42px;
+    font-weight: 700;
+    margin-bottom: 5px;
+}
 
-if uploaded_file:
+.subtitle {
+    font-size: 18px;
+    color: #666666;
+    margin-bottom: 25px;
+}
 
-    # -----------------------------------------------------
-    # LOAD DATASET
-    # -----------------------------------------------------
+.section-title {
+    font-size: 25px;
+    font-weight: 600;
+    margin-top: 25px;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# =========================================================
+# THEME COLOURS
+# =========================================================
+
+THEME_COLORS = {
+
+    "🔵 Blue": {
+        "main": RGBColor(31, 78, 121),
+        "dark": RGBColor(20, 50, 80)
+    },
+
+    "🟢 Green": {
+        "main": RGBColor(46, 125, 50),
+        "dark": RGBColor(30, 85, 35)
+    },
+
+    "🟣 Purple": {
+        "main": RGBColor(106, 76, 147),
+        "dark": RGBColor(70, 45, 100)
+    },
+
+    "🟠 Orange": {
+        "main": RGBColor(230, 126, 34),
+        "dark": RGBColor(150, 75, 15)
+    },
+
+    "🔴 Red": {
+        "main": RGBColor(192, 57, 43),
+        "dark": RGBColor(125, 35, 25)
+    },
+
+    "⚫ Dark": {
+        "main": RGBColor(45, 45, 45),
+        "dark": RGBColor(20, 20, 20)
+    },
+
+    "🔷 Teal": {
+        "main": RGBColor(0, 121, 140),
+        "dark": RGBColor(0, 75, 90)
+    }
+}
+
+
+# =========================================================
+# BACKGROUND COLOURS
+# =========================================================
+
+BACKGROUND_COLORS = {
+
+    "⚪ White": RGBColor(255, 255, 255),
+
+    "🔵 Very Light Blue": RGBColor(235, 245, 255),
+
+    "🟢 Very Light Green": RGBColor(237, 248, 237),
+
+    "🟣 Very Light Purple": RGBColor(245, 239, 250),
+
+    "🟠 Very Light Orange": RGBColor(255, 245, 232),
+
+    "🔴 Very Light Red": RGBColor(255, 240, 238),
+
+    "🔷 Very Light Teal": RGBColor(235, 249, 250),
+
+    "⚫ Light Gray": RGBColor(242, 242, 242)
+}
+
+
+# =========================================================
+# FONT OPTIONS
+# =========================================================
+
+FONT_OPTIONS = [
+    "Aptos",
+    "Arial",
+    "Calibri",
+    "Times New Roman",
+    "Georgia",
+    "Verdana",
+    "Tahoma",
+    "Trebuchet MS",
+    "Courier New"
+]
+
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+if "slides" not in st.session_state:
+    st.session_state.slides = []
+
+if "generated_ppt" not in st.session_state:
+    st.session_state.generated_ppt = None
+
+
+# =========================================================
+# CLEAN TEXT
+# =========================================================
+
+def clean_text(text):
+
+    if not text:
+        return ""
+
+    text = text.replace("\r", "\n")
+
+    return text.strip()
+
+
+# =========================================================
+# OPENAI CLIENT
+# =========================================================
+
+def get_openai_client():
 
     try:
 
-        if uploaded_file.name.lower().endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
+        api_key = st.secrets["OPENAI_API_KEY"]
 
-    except Exception as e:
+        if not api_key:
+            return None
 
-        st.error(f"❌ Unable to read the file: {e}")
-        st.stop()
+        return OpenAI(api_key=api_key)
 
-    st.success("✅ Dataset uploaded successfully!")
+    except Exception:
 
-    # -----------------------------------------------------
-    # DATASET OVERVIEW
-    # -----------------------------------------------------
+        return None
 
-    st.header("📊 Dataset Overview")
 
-    col1, col2, col3, col4 = st.columns(4)
+# =========================================================
+# AI TEXT ENHANCEMENT
+# =========================================================
 
-    with col1:
-        st.metric("Rows", df.shape[0])
+def enhance_slide_with_ai(title, content):
 
-    with col2:
-        st.metric("Columns", df.shape[1])
+    client = get_openai_client()
 
-    with col3:
-        st.metric(
-            "Total Cells",
-            df.shape[0] * df.shape[1]
-        )
+    if client is None:
+        return title, content
 
-    with col4:
-        st.metric(
-            "Memory",
-            f"{df.memory_usage(deep=True).sum() / 1024:.1f} KB"
-        )
+    prompt = f"""
+You are a professional presentation creator.
 
-    # -----------------------------------------------------
-    # DATA PREVIEW
-    # -----------------------------------------------------
+Convert the following slide content into concise PowerPoint-friendly
+bullet points.
 
-    st.header("👀 Data Preview")
+Slide title:
+{title}
 
-    st.dataframe(
-        df.head(100),
-        use_container_width=True
-    )
+Slide content:
+{content}
 
-    # -----------------------------------------------------
-    # MISSING VALUES
-    # -----------------------------------------------------
+Rules:
+- Keep the original meaning.
+- Do not invent facts.
+- Create 3 to 6 concise bullet points.
+- Each bullet should be easy to read on a presentation slide.
+- Do not use markdown.
+- Return ONLY valid JSON.
 
-    st.header("🔍 Missing Values Detection")
-
-    missing_values = df.isnull().sum()
-    total_missing = int(missing_values.sum())
-
-    missing_table = pd.DataFrame({
-        "Column": missing_values.index,
-        "Missing Values": missing_values.values,
-        "Missing %": (
-            missing_values.values / len(df) * 100
-        ).round(2)
-    })
-
-    missing_table = missing_table[
-        missing_table["Missing Values"] > 0
+Format:
+{{
+    "title": "short slide title",
+    "bullets": [
+        "bullet 1",
+        "bullet 2",
+        "bullet 3"
     ]
-
-    if missing_table.empty:
-
-        st.success("✅ No missing values found!")
-
-    else:
-
-        st.warning(
-            f"⚠️ {total_missing} missing values found."
-        )
-
-        st.dataframe(
-            missing_table,
-            use_container_width=True
-        )
-
-    # -----------------------------------------------------
-    # DUPLICATES
-    # -----------------------------------------------------
-
-    st.header("🔄 Duplicate Rows Detection")
-
-    duplicate_count = int(df.duplicated().sum())
-
-    if duplicate_count == 0:
-
-        st.success("✅ No duplicate rows found!")
-
-    else:
-
-        st.warning(
-            f"⚠️ {duplicate_count} duplicate rows found."
-        )
-
-        duplicate_rows = df[
-            df.duplicated(keep=False)
-        ]
-
-        st.dataframe(
-            duplicate_rows.head(100),
-            use_container_width=True
-        )
-
-    # -----------------------------------------------------
-    # DATA TYPES
-    # -----------------------------------------------------
-
-    st.header("🔎 Data Type Detection")
-
-    datatype_table = pd.DataFrame({
-        "Column": df.columns,
-        "Data Type": df.dtypes.astype(str).values,
-        "Unique Values": [
-            df[column].nunique(dropna=True)
-            for column in df.columns
-        ]
-    })
-
-    st.dataframe(
-        datatype_table,
-        use_container_width=True
-    )
-
-    # -----------------------------------------------------
-    # NEGATIVE VALUES
-    # -----------------------------------------------------
-
-    st.header("➖ Negative Values Detection")
-
-    numeric_columns = df.select_dtypes(
-        include="number"
-    ).columns
-
-    negative_data = []
-    total_negative = 0
-
-    for column in numeric_columns:
-
-        negative_count = int(
-            (df[column] < 0).sum()
-        )
-
-        if negative_count > 0:
-
-            total_negative += negative_count
-
-            negative_data.append({
-                "Column": column,
-                "Negative Values": negative_count
-            })
-
-    if len(negative_data) == 0:
-
-        st.success("✅ No negative values found!")
-
-    else:
-
-        negative_table = pd.DataFrame(
-            negative_data
-        )
-
-        st.warning(
-            f"⚠️ {total_negative} negative values found."
-        )
-
-        st.dataframe(
-            negative_table,
-            use_container_width=True
-        )
-
-    # -----------------------------------------------------
-    # OUTLIER DETECTION
-    # -----------------------------------------------------
-
-    st.header("📈 Outlier Detection")
-
-    outlier_data = []
-    outlier_limits = {}
-    total_outliers = 0
-
-    for column in numeric_columns:
-
-        valid_values = df[column].dropna()
-
-        if len(valid_values) >= 4:
-
-            q1 = valid_values.quantile(0.25)
-            q3 = valid_values.quantile(0.75)
-
-            iqr = q3 - q1
-
-            lower_limit = q1 - (1.5 * iqr)
-            upper_limit = q3 + (1.5 * iqr)
-
-            outlier_limits[column] = (
-                lower_limit,
-                upper_limit
-            )
-
-            outlier_count = int(
-                (
-                    (df[column] < lower_limit) |
-                    (df[column] > upper_limit)
-                ).sum()
-            )
-
-            if outlier_count > 0:
-
-                total_outliers += outlier_count
-
-                outlier_data.append({
-                    "Column": column,
-                    "Outliers": outlier_count,
-                    "Lower Limit": round(
-                        lower_limit, 2
-                    ),
-                    "Upper Limit": round(
-                        upper_limit, 2
-                    )
-                })
-
-    if len(outlier_data) == 0:
-
-        st.success(
-            "✅ No significant outliers found!"
-        )
-
-    else:
-
-        outlier_table = pd.DataFrame(
-            outlier_data
-        )
-
-        st.warning(
-            f"⚠️ {total_outliers} potential outliers found."
-        )
-
-        st.dataframe(
-            outlier_table,
-            use_container_width=True
-        )
-
-    # -----------------------------------------------------
-    # CONSTANT COLUMNS
-    # -----------------------------------------------------
-
-    st.header("📌 Constant Columns Detection")
-
-    constant_columns = []
-
-    for column in df.columns:
-
-        if df[column].nunique(
-            dropna=False
-        ) <= 1:
-
-            constant_columns.append(column)
-
-    if len(constant_columns) == 0:
-
-        st.success(
-            "✅ No constant columns found!"
-        )
-
-    else:
-
-        st.warning(
-            f"⚠️ {len(constant_columns)} constant column(s) found."
-        )
-
-        st.dataframe(
-            pd.DataFrame({
-                "Constant Columns":
-                    constant_columns
-            }),
-            use_container_width=True
-        )
-
-    # -----------------------------------------------------
-    # INCONSISTENT TEXT DETECTION
-    # -----------------------------------------------------
-
-    st.header("🔤 Inconsistent Text Detection")
-
-    text_columns = df.select_dtypes(
-        include=["object", "string", "category"]
-    ).columns
-
-    inconsistent_data = []
-
-    for column in text_columns:
-
-        values = (
-            df[column]
-            .dropna()
-            .astype(str)
-            .str.strip()
-        )
-
-        if len(values) > 0:
-
-            unique_original = values.nunique()
-
-            unique_lower = (
-                values.str.lower().nunique()
-            )
-
-            if unique_original > unique_lower:
-
-                inconsistent_data.append({
-                    "Column": column,
-                    "Original Unique Values":
-                        unique_original,
-                    "After Standardizing Case":
-                        unique_lower,
-                    "Potential Inconsistency":
-                        unique_original -
-                        unique_lower
-                })
-
-    if len(inconsistent_data) == 0:
-
-        st.success(
-            "✅ No obvious text inconsistencies found!"
-        )
-
-    else:
-
-        st.warning(
-            "⚠️ Possible inconsistent text values detected."
-        )
-
-        st.dataframe(
-            pd.DataFrame(inconsistent_data),
-            use_container_width=True
-        )
-
-    # -----------------------------------------------------
-    # DATA QUALITY SCORE
-    # -----------------------------------------------------
-
-    st.header("⭐ Data Quality Score")
-
-    total_cells = df.shape[0] * df.shape[1]
-
-    if total_cells > 0 and df.shape[0] > 0:
-
-        missing_rate = (
-            total_missing / total_cells
-        )
-
-        duplicate_rate = (
-            duplicate_count / df.shape[0]
-        )
-
-        missing_penalty = min(
-            missing_rate * 40,
-            40
-        )
-
-        duplicate_penalty = min(
-            duplicate_rate * 20,
-            20
-        )
-
-        negative_penalty = min(
-            (total_negative / total_cells) * 20,
-            20
-        )
-
-        outlier_penalty = min(
-            (total_outliers / total_cells) * 15,
-            15
-        )
-
-        constant_penalty = min(
-            (len(constant_columns) /
-             max(df.shape[1], 1)) * 5,
-            5
-        )
-
-        score = 100 - (
-            missing_penalty
-            + duplicate_penalty
-            + negative_penalty
-            + outlier_penalty
-            + constant_penalty
-        )
-
-        score = max(
-            0,
-            min(100, score)
-        )
-
-        st.metric(
-            "Overall Data Quality Score",
-            f"{score:.1f}/100"
-        )
-
-        if score >= 90:
-
-            st.success(
-                "🟢 Excellent Data Quality"
-            )
-
-        elif score >= 75:
-
-            st.info(
-                "🟡 Good Data Quality"
-            )
-
-        elif score >= 50:
-
-            st.warning(
-                "🟠 Moderate Data Quality"
-            )
-
-        else:
-
-            st.error(
-                "🔴 Poor Data Quality"
-            )
-
-    else:
-
-        score = 0
-
-    # -----------------------------------------------------
-    # AI RECOMMENDATIONS
-    # -----------------------------------------------------
-
-    st.header("🤖 AI Recommendations")
-
-    recommendations = []
-
-    if total_missing > 0:
-
-        recommendations.append(
-            f"🔍 Missing Values: {total_missing} "
-            "missing values were detected. "
-            "Numeric values can usually be filled "
-            "using the median, while categorical "
-            "values can use the most frequent value."
-        )
-
-    else:
-
-        recommendations.append(
-            "✅ Missing Values: No missing values detected."
-        )
-
-    if duplicate_count > 0:
-
-        recommendations.append(
-            f"🔄 Duplicate Rows: {duplicate_count} "
-            "duplicate rows were detected. "
-            "Review them and remove them if they "
-            "represent repeated records."
-        )
-
-    else:
-
-        recommendations.append(
-            "✅ Duplicate Rows: No duplicate rows detected."
-        )
-
-    if total_negative > 0:
-
-        recommendations.append(
-            f"➖ Negative Values: {total_negative} "
-            "negative values were detected. "
-            "Check whether negative values are "
-            "valid for the relevant business fields."
-        )
-
-    else:
-
-        recommendations.append(
-            "✅ Negative Values: No negative values detected."
-        )
-
-    if total_outliers > 0:
-
-        recommendations.append(
-            f"📈 Outliers: {total_outliers} "
-            "potential outliers were detected. "
-            "Investigate them before deleting because "
-            "they may represent genuine observations."
-        )
-
-    else:
-
-        recommendations.append(
-            "✅ Outliers: No significant outliers detected."
-        )
-
-    if len(constant_columns) > 0:
-
-        recommendations.append(
-            f"📌 Constant Columns: "
-            f"{len(constant_columns)} constant "
-            "column(s) were found. "
-            "Consider removing them if they do not "
-            "provide useful analytical information."
-        )
-
-    else:
-
-        recommendations.append(
-            "✅ Constant Columns: No constant columns detected."
-        )
-
-    if len(inconsistent_data) > 0:
-
-        recommendations.append(
-            "🔤 Text Consistency: Some text columns "
-            "contain values with inconsistent capitalization "
-            "or spacing. Standardization is recommended."
-        )
-
-    else:
-
-        recommendations.append(
-            "✅ Text Consistency: No obvious text inconsistencies found."
-        )
-
-    if score >= 90:
-
-        recommendations.append(
-            "⭐ Overall: Excellent data quality. "
-            "The dataset is ready for analysis with "
-            "minimal cleaning."
-        )
-
-    elif score >= 75:
-
-        recommendations.append(
-            "⭐ Overall: Good data quality. "
-            "Address the detected issues before analysis."
-        )
-
-    elif score >= 50:
-
-        recommendations.append(
-            "⭐ Overall: Moderate data quality. "
-            "Major data-quality issues should be addressed."
-        )
-
-    else:
-
-        recommendations.append(
-            "⭐ Overall: Poor data quality. "
-            "Significant cleaning is recommended before analysis."
-        )
-
-    for recommendation in recommendations:
-
-        st.write(recommendation)
-
-    # -----------------------------------------------------
-    # OUTLIER TREATMENT
-    # -----------------------------------------------------
-
-    st.header("🛠️ Outlier Treatment")
-
-    st.write(
-        "Choose how DataGuard AI should handle detected outliers."
-    )
-
-    outlier_option = st.selectbox(
-        "Select Outlier Treatment",
-        [
-            "Keep Outliers",
-            "Remove Outliers",
-            "Cap Outliers"
-        ]
-    )
-
-    # -----------------------------------------------------
-    # TEXT CLEANING OPTION
-    # -----------------------------------------------------
-
-    text_clean_option = st.checkbox(
-        "🔤 Standardize text values "
-        "(remove extra spaces and standardize capitalization)"
-    )
-
-    # -----------------------------------------------------
-    # CONSTANT COLUMN OPTION
-    # -----------------------------------------------------
-
-    remove_constant_option = st.checkbox(
-        "📌 Remove constant columns"
-    )
-
-    # -----------------------------------------------------
-    # EDA
-    # -----------------------------------------------------
-
-    st.header("📊 Exploratory Data Analysis")
-
-    if len(numeric_columns) > 0:
-
-        chart_column = st.selectbox(
-            "Select a numeric column",
-            list(numeric_columns)
-        )
-
-        chart_type = st.selectbox(
-            "Select chart type",
-            [
-                "Histogram",
-                "Box Plot",
-                "Line Chart"
-            ]
-        )
-
-        if chart_type == "Histogram":
-
-            st.bar_chart(
-                df[chart_column].value_counts(
-                    bins=10
-                ).sort_index()
-            )
-
-        elif chart_type == "Box Plot":
-
-            st.line_chart(
-                df[[chart_column]].reset_index(
-                    drop=True
-                )
-            )
-
-            st.write(
-                "Box plots are represented using the "
-                "selected numeric values for quick inspection."
-            )
-
-        else:
-
-            st.line_chart(
-                df[chart_column].reset_index(
-                    drop=True
-                )
-            )
-
-    else:
-
-        st.info(
-            "ℹ️ No numeric columns are available for charts."
-        )
-
-    # -----------------------------------------------------
-    # DATASET Q&A
-    # -----------------------------------------------------
-
-    st.header("💬 Ask DataGuard AI")
-
-    question = st.text_input(
-        "Ask a question about your dataset",
-        placeholder=(
-            "Example: How many rows are there?"
-        )
-    )
-
-    if question:
-
-        q = question.lower()
-
-        if "row" in q:
-
-            st.info(
-                f"📊 Your dataset contains "
-                f"{df.shape[0]} rows."
-            )
-
-        elif "column" in q:
-
-            st.info(
-                f"📊 Your dataset contains "
-                f"{df.shape[1]} columns."
-            )
-
-        elif "missing" in q:
-
-            st.info(
-                f"🔍 Your dataset contains "
-                f"{total_missing} missing values."
-            )
-
-        elif "duplicate" in q:
-
-            st.info(
-                f"🔄 Your dataset contains "
-                f"{duplicate_count} duplicate rows."
-            )
-
-        elif "outlier" in q:
-
-            st.info(
-                f"📈 Your dataset contains "
-                f"{total_outliers} potential outliers."
-            )
-
-        elif "negative" in q:
-
-            st.info(
-                f"➖ Your dataset contains "
-                f"{total_negative} negative values."
-            )
-
-        elif "quality" in q or "score" in q:
-
-            st.info(
-                f"⭐ Your current data quality score is "
-                f"{score:.1f}/100."
-            )
-
-        elif "numeric" in q:
-
-            st.info(
-                f"🔢 There are "
-                f"{len(numeric_columns)} numeric columns."
-            )
-
-        elif "text" in q:
-
-            st.info(
-                f"🔤 There are "
-                f"{len(text_columns)} text columns."
-            )
-
-        elif "constant" in q:
-
-            st.info(
-                f"📌 There are "
-                f"{len(constant_columns)} constant columns."
-            )
-
-        else:
-
-            st.info(
-                "🤖 I can currently answer questions about "
-                "rows, columns, missing values, duplicates, "
-                "outliers, negative values, quality score, "
-                "numeric columns, text columns and constant columns."
-            )
-
-    # -----------------------------------------------------
-    # AUTOMATIC CLEANING
-    # -----------------------------------------------------
-
-    st.header("🧹 Data Cleaning")
-
-    st.write(
-        "Apply the selected cleaning options to create a cleaned dataset."
-    )
-
-    if st.button("🧹 Clean Dataset"):
-
-        cleaned_df = df.copy()
-
-        original_rows = cleaned_df.shape[0]
-        original_columns = cleaned_df.shape[1]
-
-        # -----------------------------------------------
-        # REMOVE DUPLICATES
-        # -----------------------------------------------
-
-        cleaned_df = cleaned_df.drop_duplicates()
-
-        duplicates_removed = (
-            original_rows -
-            cleaned_df.shape[0]
-        )
-
-        # -----------------------------------------------
-        # FILL MISSING VALUES
-        # -----------------------------------------------
-
-        numeric_cols = cleaned_df.select_dtypes(
-            include="number"
-        ).columns
-
-        text_cols = cleaned_df.select_dtypes(
-            exclude="number"
-        ).columns
-
-        numeric_filled = 0
-        text_filled = 0
-
-        for column in numeric_cols:
-
-            missing_before = int(
-                cleaned_df[column].isnull().sum()
-            )
-
-            if missing_before > 0:
-
-                median_value = (
-                    cleaned_df[column].median()
-                )
-
-                if pd.notna(median_value):
-
-                    cleaned_df[column] = (
-                        cleaned_df[column]
-                        .fillna(median_value)
-                    )
-
-                    numeric_filled += missing_before
-
-        for column in text_cols:
-
-            missing_before = int(
-                cleaned_df[column].isnull().sum()
-            )
-
-            if missing_before > 0:
-
-                mode_values = (
-                    cleaned_df[column].mode()
-                )
-
-                if not mode_values.empty:
-
-                    cleaned_df[column] = (
-                        cleaned_df[column]
-                        .fillna(
-                            mode_values.iloc[0]
-                        )
-                    )
-
-                    text_filled += missing_before
-
-        # -----------------------------------------------
-        # TEXT STANDARDIZATION
-        # -----------------------------------------------
-
-        text_values_changed = 0
-
-        if text_clean_option:
-
-            for column in cleaned_df.select_dtypes(
-                include=["object", "string"]
-            ).columns:
-
-                before = (
-                    cleaned_df[column]
-                    .astype(str)
-                    .copy()
-                )
-
-                after = (
-                    cleaned_df[column]
-                    .astype(str)
-                    .str.strip()
-                    .str.lower()
-                )
-
-                text_values_changed += int(
-                    (before != after).sum()
-                )
-
-                cleaned_df[column] = after
-
-        # -----------------------------------------------
-        # CONSTANT COLUMN REMOVAL
-        # -----------------------------------------------
-
-        constant_removed = 0
-
-        if remove_constant_option:
-
-            columns_to_remove = []
-
-            for column in cleaned_df.columns:
-
-                if cleaned_df[column].nunique(
-                    dropna=False
-                ) <= 1:
-
-                    columns_to_remove.append(column)
-
-            if columns_to_remove:
-
-                cleaned_df = cleaned_df.drop(
-                    columns=columns_to_remove
-                )
-
-                constant_removed = len(
-                    columns_to_remove
-                )
-
-        # -----------------------------------------------
-        # OUTLIER TREATMENT
-        # -----------------------------------------------
-
-        outliers_removed = 0
-        outliers_capped = 0
-
-        if outlier_option != "Keep Outliers":
-
-            for column in cleaned_df.select_dtypes(
-                include="number"
-            ).columns:
-
-                valid_values = (
-                    cleaned_df[column].dropna()
-                )
-
-                if len(valid_values) >= 4:
-
-                    q1 = valid_values.quantile(0.25)
-                    q3 = valid_values.quantile(0.75)
-
-                    iqr = q3 - q1
-
-                    lower_limit = (
-                        q1 - 1.5 * iqr
-                    )
-
-                    upper_limit = (
-                        q3 + 1.5 * iqr
-                    )
-
-                    if outlier_option == "Remove Outliers":
-
-                        mask = (
-                            (cleaned_df[column] < lower_limit) |
-                            (cleaned_df[column] > upper_limit)
-                        )
-
-                        outliers_removed += int(
-                            mask.sum()
-                        )
-
-                        cleaned_df = cleaned_df[
-                            ~mask
-                        ]
-
-                    elif outlier_option == "Cap Outliers":
-
-                        lower_mask = (
-                            cleaned_df[column]
-                            < lower_limit
-                        )
-
-                        upper_mask = (
-                            cleaned_df[column]
-                            > upper_limit
-                        )
-
-                        outliers_capped += int(
-                            lower_mask.sum()
-                            + upper_mask.sum()
-                        )
-
-                        cleaned_df[column] = (
-                            cleaned_df[column]
-                            .clip(
-                                lower=lower_limit,
-                                upper=upper_limit
-                            )
-                        )
-
-        # -----------------------------------------------
-        # CLEANING RESULTS
-        # -----------------------------------------------
-
-        st.success(
-            "✅ Dataset cleaned successfully!"
-        )
-
-        result1, result2, result3 = st.columns(3)
-
-        with result1:
-
-            st.metric(
-                "Original Rows",
-                original_rows
-            )
-
-        with result2:
-
-            st.metric(
-                "Cleaned Rows",
-                cleaned_df.shape[0]
-            )
-
-        with result3:
-
-            st.metric(
-                "Cleaned Columns",
-                cleaned_df.shape[1]
-            )
-
-        st.write(
-            f"🔄 Duplicate rows removed: "
-            f"{duplicates_removed}"
-        )
-
-        st.write(
-            f"🔢 Missing numeric values filled: "
-            f"{numeric_filled}"
-        )
-
-        st.write(
-            f"🔤 Missing text values filled: "
-            f"{text_filled}"
-        )
-
-        st.write(
-            f"✏️ Text values standardized: "
-            f"{text_values_changed}"
-        )
-
-        st.write(
-            f"📌 Constant columns removed: "
-            f"{constant_removed}"
-        )
-
-        st.write(
-            f"📈 Outliers removed: "
-            f"{outliers_removed}"
-        )
-
-        st.write(
-            f"📊 Outliers capped: "
-            f"{outliers_capped}"
-        )
-
-        # -----------------------------------------------
-        # CLEANED DATA PREVIEW
-        # -----------------------------------------------
-
-        st.header("✨ Cleaned Dataset Preview")
-
-        st.dataframe(
-            cleaned_df.head(100),
-            use_container_width=True
-        )
-
-        # -----------------------------------------------
-        # DOWNLOAD CLEANED EXCEL
-        # -----------------------------------------------
-
-        output = BytesIO()
-
-        with pd.ExcelWriter(
-            output,
-            engine="openpyxl"
-        ) as writer:
-
-            cleaned_df.to_excel(
-                writer,
-                index=False,
-                sheet_name="Cleaned Data"
-            )
-
-        st.download_button(
-            label="📥 Download Cleaned Dataset",
-            data=output.getvalue(),
-            file_name="DataGuard_AI_Cleaned.xlsx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            )
-        )
-
-        # -----------------------------------------------
-        # DATA QUALITY REPORT
-        # -----------------------------------------------
-
-        st.header("📄 Data Quality Report")
-
-        report = f"""
-DATAGUARD AI - DATA QUALITY REPORT
-===================================
-
-Dataset:
-{uploaded_file.name}
-
-DATASET OVERVIEW
-----------------
-Rows: {df.shape[0]}
-Columns: {df.shape[1]}
-Total Cells: {total_cells}
-
-DATA QUALITY
-------------
-Quality Score: {score:.1f}/100
-
-Missing Values: {total_missing}
-Duplicate Rows: {duplicate_count}
-Negative Values: {total_negative}
-Potential Outliers: {total_outliers}
-Constant Columns: {len(constant_columns)}
-Text Inconsistency Columns: {len(inconsistent_data)}
-
-CLEANING RESULTS
-----------------
-Duplicate Rows Removed: {duplicates_removed}
-Missing Numeric Values Filled: {numeric_filled}
-Missing Text Values Filled: {text_filled}
-Text Values Standardized: {text_values_changed}
-Constant Columns Removed: {constant_removed}
-Outliers Removed: {outliers_removed}
-Outliers Capped: {outliers_capped}
-
-RECOMMENDATIONS
----------------
+}}
 """
 
-        for recommendation in recommendations:
+    try:
 
-            report += (
-                "- "
-                + recommendation
-                + "\n"
+        response = client.responses.create(
+            model="gpt-6-luna",
+            input=prompt
+        )
+
+        result = response.output_text.strip()
+
+        result = re.sub(
+            r"```json|```",
+            "",
+            result
+        ).strip()
+
+        data = json.loads(result)
+
+        new_title = data.get("title", title)
+
+        bullets = data.get("bullets", [])
+
+        if isinstance(bullets, list):
+
+            new_content = "\n".join(
+                f"• {str(b).strip()}"
+                for b in bullets
+                if str(b).strip()
             )
 
-        st.text_area(
-            "Report Preview",
-            report,
-            height=350
+            return new_title, new_content
+
+    except Exception:
+
+        st.warning(
+            "AI enhancement could not be applied. "
+            "Original content will be used."
         )
 
-        st.download_button(
-            label="📄 Download Data Quality Report",
-            data=report,
-            file_name="DataGuard_AI_Report.txt",
-            mime="text/plain"
+    return title, content
+
+
+# =========================================================
+# ADD TEXT BOX
+# =========================================================
+
+def add_text_box(
+    slide,
+    text,
+    left,
+    top,
+    width,
+    height,
+    font_name="Aptos",
+    font_size=20,
+    color=RGBColor(40, 40, 40),
+    bold=False,
+    italic=False,
+    alignment=PP_ALIGN.LEFT
+):
+
+    box = slide.shapes.add_textbox(
+        Inches(left),
+        Inches(top),
+        Inches(width),
+        Inches(height)
+    )
+
+    tf = box.text_frame
+
+    tf.clear()
+
+    tf.word_wrap = True
+
+    tf.vertical_anchor = MSO_ANCHOR.TOP
+
+    p = tf.paragraphs[0]
+
+    p.text = text
+
+    p.alignment = alignment
+
+    p.font.name = font_name
+
+    p.font.size = Pt(font_size)
+
+    p.font.bold = bold
+
+    p.font.italic = italic
+
+    p.font.color.rgb = color
+
+    return box
+
+
+# =========================================================
+# ADD FOOTER
+# =========================================================
+
+def add_footer(
+    slide,
+    theme,
+    font_name
+):
+
+    line = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(0),
+        Inches(7.25),
+        Inches(13.333),
+        Inches(0.08)
+    )
+
+    line.fill.solid()
+
+    line.fill.fore_color.rgb = theme["main"]
+
+    line.line.fill.background()
+
+    add_text_box(
+        slide,
+        "SlideGuard AI | Developed by Aliya Banu A",
+        0.45,
+        7.32,
+        12.4,
+        0.25,
+        font_name=font_name,
+        font_size=9,
+        color=RGBColor(120, 120, 120),
+        alignment=PP_ALIGN.RIGHT
+    )
+
+
+# =========================================================
+# TITLE SLIDE
+# =========================================================
+
+def create_title_slide(
+    prs,
+    title,
+    presented_by,
+    theme,
+    background_color,
+    font_name,
+    font_size,
+    text_color,
+    bold,
+    italic,
+    alignment
+):
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+    # Background
+    background = slide.background
+
+    fill = background.fill
+
+    fill.solid()
+
+    fill.fore_color.rgb = background_color
+
+
+    # Top colour block
+    shape = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(0),
+        Inches(0),
+        Inches(13.333),
+        Inches(1.0)
+    )
+
+    shape.fill.solid()
+
+    shape.fill.fore_color.rgb = theme["main"]
+
+    shape.line.fill.background()
+
+
+    # Presentation title
+    add_text_box(
+        slide,
+        title,
+        0.8,
+        2.2,
+        11.7,
+        1.4,
+        font_name=font_name,
+        font_size=font_size + 10,
+        color=theme["dark"],
+        bold=True,
+        italic=italic,
+        alignment=PP_ALIGN.CENTER
+    )
+
+
+    # Presented By
+    if presented_by:
+
+        add_text_box(
+            slide,
+            f"Presented By: {presented_by}",
+            1.2,
+            3.7,
+            10.9,
+            0.8,
+            font_name=font_name,
+            font_size=font_size,
+            color=text_color,
+            bold=bold,
+            italic=italic,
+            alignment=PP_ALIGN.CENTER
         )
+
+
+    # Accent
+    accent = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(4.5),
+        Inches(5.2),
+        Inches(4.3),
+        Inches(0.12)
+    )
+
+    accent.fill.solid()
+
+    accent.fill.fore_color.rgb = theme["main"]
+
+    accent.line.fill.background()
+
+
+    add_footer(
+        slide,
+        theme,
+        font_name
+    )
+
+
+# =========================================================
+# CONTENT SLIDE
+# =========================================================
+
+def create_content_slide(
+    prs,
+    title,
+    content,
+    image_bytes,
+    theme,
+    background_color,
+    font_name,
+    font_size,
+    text_color,
+    bold,
+    italic,
+    alignment
+):
+
+    slide = prs.slides.add_slide(
+        prs.slide_layouts[6]
+    )
+
+
+    # Background
+    background = slide.background
+
+    fill = background.fill
+
+    fill.solid()
+
+    fill.fore_color.rgb = background_color
+
+
+    # Header
+    header = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(0),
+        Inches(0),
+        Inches(13.333),
+        Inches(0.75)
+    )
+
+    header.fill.solid()
+
+    header.fill.fore_color.rgb = theme["main"]
+
+    header.line.fill.background()
+
+
+    # Slide title
+    add_text_box(
+        slide,
+        title,
+        0.5,
+        0.13,
+        12.2,
+        0.45,
+        font_name=font_name,
+        font_size=25,
+        color=RGBColor(255, 255, 255),
+        bold=True
+    )
+
+
+    # =====================================================
+    # CONTENT WITH IMAGE
+    # =====================================================
+
+    if image_bytes:
+
+        content_box = slide.shapes.add_textbox(
+            Inches(0.65),
+            Inches(1.15),
+            Inches(6.8),
+            Inches(5.65)
+        )
+
+        tf = content_box.text_frame
+
+        tf.clear()
+
+        tf.word_wrap = True
+
+        lines = content.split("\n")
+
+        first = True
+
+        for line in lines:
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            if first:
+
+                p = tf.paragraphs[0]
+
+                first = False
+
+            else:
+
+                p = tf.add_paragraph()
+
+            p.text = line
+
+            p.font.name = font_name
+
+            p.font.size = Pt(font_size)
+
+            p.font.color.rgb = text_color
+
+            p.font.bold = bold
+
+            p.font.italic = italic
+
+            p.alignment = alignment
+
+            p.space_after = Pt(10)
+
+
+        # Image
+        try:
+
+            image_stream = io.BytesIO(
+                image_bytes
+            )
+
+            slide.shapes.add_picture(
+                image_stream,
+                Inches(7.85),
+                Inches(1.35),
+                width=Inches(4.85),
+                height=Inches(4.85)
+            )
+
+        except Exception:
+
+            pass
+
+
+    # =====================================================
+    # CONTENT WITHOUT IMAGE
+    # =====================================================
+
+    else:
+
+        content_box = slide.shapes.add_textbox(
+            Inches(0.8),
+            Inches(1.25),
+            Inches(11.8),
+            Inches(5.5)
+        )
+
+        tf = content_box.text_frame
+
+        tf.clear()
+
+        tf.word_wrap = True
+
+        lines = content.split("\n")
+
+        first = True
+
+        for line in lines:
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            if first:
+
+                p = tf.paragraphs[0]
+
+                first = False
+
+            else:
+
+                p = tf.add_paragraph()
+
+            p.text = line
+
+            p.font.name = font_name
+
+            p.font.size = Pt(font_size)
+
+            p.font.color.rgb = text_color
+
+            p.font.bold = bold
+
+            p.font.italic = italic
+
+            p.alignment = alignment
+
+            p.space_after = Pt(12)
+
+
+    add_footer(
+        slide,
+        theme,
+        font_name
+    )
+
+
+# =========================================================
+# CREATE POWERPOINT
+# =========================================================
+
+def create_presentation(
+    presentation_title,
+    presented_by,
+    slides_data,
+    theme,
+    background_color,
+    font_name,
+    font_size,
+    text_color,
+    bold,
+    italic,
+    alignment
+):
+
+    prs = Presentation()
+
+    # 16:9 widescreen
+    prs.slide_width = Inches(13.333)
+
+    prs.slide_height = Inches(7.5)
+
+
+    # Title slide
+    create_title_slide(
+        prs,
+        presentation_title,
+        presented_by,
+        theme,
+        background_color,
+        font_name,
+        font_size,
+        text_color,
+        bold,
+        italic,
+        alignment
+    )
+
+
+    # Content slides
+    for slide_data in slides_data:
+
+        create_content_slide(
+            prs,
+            slide_data["title"],
+            slide_data["content"],
+            slide_data["image"],
+            theme,
+            background_color,
+            font_name,
+            font_size,
+            text_color,
+            bold,
+            italic,
+            alignment
+        )
+
+
+    output = io.BytesIO()
+
+    prs.save(output)
+
+    output.seek(0)
+
+    return output
+
+
+# =========================================================
+# HEADER
+# =========================================================
+
+st.markdown(
+    '<div class="main-title">🛡️ SlideGuard AI</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'AI-Powered Presentation Generator'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+
+# =========================================================
+# SIDEBAR
+# =========================================================
+
+st.sidebar.title(
+    "🎨 Presentation Settings"
+)
+
+
+# Theme
+theme_name = st.sidebar.selectbox(
+    "🎨 Theme Colour",
+    list(THEME_COLORS.keys())
+)
+
+theme = THEME_COLORS[theme_name]
+
+
+# Background
+background_name = st.sidebar.selectbox(
+    "🖼️ Background Colour",
+    list(BACKGROUND_COLORS.keys())
+)
+
+background_color = BACKGROUND_COLORS[
+    background_name
+]
+
+
+st.sidebar.markdown("---")
+
+
+# =========================================================
+# TEXT FORMATTING
+# =========================================================
+
+st.sidebar.subheader(
+    "✍️ Text Formatting"
+)
+
+
+# Font
+font_name = st.sidebar.selectbox(
+    "Font",
+    FONT_OPTIONS
+)
+
+
+# Font size
+font_size = st.sidebar.slider(
+    "Font Size",
+    min_value=12,
+    max_value=32,
+    value=20,
+    step=1
+)
+
+
+# Font style
+font_style = st.sidebar.selectbox(
+    "Font Style",
+    [
+        "Normal",
+        "Bold",
+        "Italic",
+        "Bold Italic"
+    ]
+)
+
+
+bold = font_style in [
+    "Bold",
+    "Bold Italic"
+]
+
+italic = font_style in [
+    "Italic",
+    "Bold Italic"
+]
+
+
+# Text colour
+text_color_name = st.sidebar.selectbox(
+    "Text Colour",
+    [
+        "⚫ Black",
+        "🔵 Dark Blue",
+        "🟢 Dark Green",
+        "🟣 Dark Purple",
+        "🔴 Dark Red",
+        "⚪ White"
+    ]
+)
+
+
+TEXT_COLORS = {
+
+    "⚫ Black": RGBColor(40, 40, 40),
+
+    "🔵 Dark Blue": RGBColor(20, 50, 80),
+
+    "🟢 Dark Green": RGBColor(30, 85, 35),
+
+    "🟣 Dark Purple": RGBColor(70, 45, 100),
+
+    "🔴 Dark Red": RGBColor(125, 35, 25),
+
+    "⚪ White": RGBColor(255, 255, 255)
+}
+
+
+text_color = TEXT_COLORS[
+    text_color_name
+]
+
+
+# Alignment
+alignment_name = st.sidebar.selectbox(
+    "📐 Text Alignment",
+    [
+        "⬅️ Left",
+        "↔️ Center",
+        "➡️ Right",
+        "📏 Justify"
+    ]
+)
+
+
+if alignment_name == "⬅️ Left":
+
+    alignment = PP_ALIGN.LEFT
+
+elif alignment_name == "↔️ Center":
+
+    alignment = PP_ALIGN.CENTER
+
+elif alignment_name == "➡️ Right":
+
+    alignment = PP_ALIGN.RIGHT
 
 else:
 
-    st.info(
-        "👆 Please upload a CSV or Excel file to begin."
+    alignment = PP_ALIGN.JUSTIFY
+
+st.sidebar.markdown("---")
+
+
+st.sidebar.info(
+    "Choose the theme, background colour and "
+    "text formatting before generating your presentation."
+)
+
+
+# =========================================================
+# PRESENTATION DETAILS
+# =========================================================
+
+st.markdown(
+    '<div class="section-title">'
+    '📋 Presentation Details'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+
+presentation_title = st.text_input(
+    "Presentation Title",
+    placeholder=(
+        "Example: Artificial Intelligence in Business"
     )
+)
+
+
+presented_by = st.text_input(
+    "Presented By",
+    placeholder="Example: Aliya Banu A"
+)
+
+
+number_of_slides = st.number_input(
+    "Number of Content Slides",
+    min_value=1,
+    max_value=30,
+    value=3,
+    step=1
+)
+
+
+# =========================================================
+# GENERATE SLIDE INPUTS
+# =========================================================
+
+if st.button(
+    "📝 Generate Slide Inputs",
+    use_container_width=True
+):
+
+    st.session_state.slides = []
+
+    st.session_state.generated_ppt = None
+
+    for i in range(
+        int(number_of_slides)
+    ):
+
+        st.session_state.slides.append({
+
+            "title": "",
+
+            "content": "",
+
+            "image": None
+        })
+
+    st.rerun()
+
+
+# =========================================================
+# SLIDE INPUTS
+# =========================================================
+
+if st.session_state.slides:
+
+    st.markdown(
+        '<div class="section-title">'
+        '📝 Slide Content'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+
+    for i in range(
+        len(st.session_state.slides)
+    ):
+
+        st.markdown(
+            f"### 📌 Slide {i + 1}"
+        )
+
+
+        # Slide title
+        slide_title = st.text_input(
+            f"Slide {i + 1} Title",
+            value=st.session_state.slides[i]["title"],
+            key=f"title_{i}",
+            placeholder="Enter slide title"
+        )
+
+
+        # Slide content
+        slide_content = st.text_area(
+            f"Slide {i + 1} Content",
+            value=st.session_state.slides[i]["content"],
+            key=f"content_{i}",
+            height=150,
+            placeholder=(
+                "Paste your slide content here..."
+            )
+        )
+
+
+        # =================================================
+        # PICTURE UPLOAD
+        # =================================================
+
+        st.markdown(
+            "🖼️ **Picture for this slide**"
+        )
+
+        image_file = st.file_uploader(
+            f"Upload Picture for Slide {i + 1} "
+            "(Optional)",
+            type=[
+                "png",
+                "jpg",
+                "jpeg"
+            ],
+            key=f"image_{i}"
+        )
+
+
+        if image_file:
+
+            st.image(
+                image_file,
+                caption=f"Slide {i + 1} Picture",
+                width=350
+            )
+
+
+        # Save slide data
+        st.session_state.slides[i][
+            "title"
+        ] = slide_title
+
+        st.session_state.slides[i][
+            "content"
+        ] = slide_content
+
+
+        if image_file:
+
+            st.session_state.slides[i][
+                "image"
+            ] = image_file.getvalue()
+
+
+        st.divider()
+
+
+# =========================================================
+# AI TEXT ENHANCEMENT
+# =========================================================
+
+if st.session_state.slides:
+
+    st.markdown(
+        '<div class="section-title">'
+        '✨ AI Enhancement'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+
+    ai_enabled = st.checkbox(
+        "Use AI to improve slide content",
+        value=False
+    )
+
+
+    st.caption(
+        "AI converts long paragraphs into concise "
+        "presentation-friendly bullet points."
+    )
+
+
+# =========================================================
+# GENERATE POWERPOINT
+# =========================================================
+
+if st.session_state.slides:
+
+    if st.button(
+        "🚀 Generate PowerPoint",
+        type="primary",
+        use_container_width=True
+    ):
+
+        if not presentation_title.strip():
+
+            st.error(
+                "Please enter a presentation title."
+            )
+
+        else:
+
+            valid = True
+
+
+            for i, slide in enumerate(
+                st.session_state.slides
+            ):
+
+                if not slide["title"].strip():
+
+                    st.error(
+                        f"Please enter a title "
+                        f"for Slide {i + 1}."
+                    )
+
+                    valid = False
+
+
+                if not slide["content"].strip():
+
+                    st.error(
+                        f"Please enter content "
+                        f"for Slide {i + 1}."
+                    )
+
+                    valid = False
+
+
+            if valid:
+
+                processed_slides = []
+
+
+                progress = st.progress(0)
+
+
+                for i, slide in enumerate(
+                    st.session_state.slides
+                ):
+
+                    title = slide["title"]
+
+                    content = slide["content"]
+
+
+                    # AI text enhancement
+                    if ai_enabled:
+
+                        title, content = (
+                            enhance_slide_with_ai(
+                                title,
+                                content
+                            )
+                        )
+
+
+                    processed_slides.append({
+
+                        "title": title,
+
+                        "content": content,
+
+                        "image": slide["image"]
+                    })
+
+
+                    progress.progress(
+                        (i + 1) /
+                        len(
+                            st.session_state.slides
+                        )
+                    )
+
+
+                # Create PPT
+                ppt = create_presentation(
+
+                    presentation_title,
+
+                    presented_by,
+
+                    processed_slides,
+
+                    theme,
+
+                    background_color,
+
+                    font_name,
+
+                    font_size,
+
+                    text_color,
+
+                    bold,
+
+                    italic,
+
+                    alignment
+                )
+
+
+                st.session_state.generated_ppt = (
+                    ppt.getvalue()
+                )
+
+
+                st.success(
+                    "🎉 PowerPoint generated successfully!"
+                )
+
+
+# =========================================================
+# DOWNLOAD
+# =========================================================
+
+if st.session_state.generated_ppt:
+
+    st.markdown("---")
+
+    st.subheader(
+        "📥 Download Presentation"
+    )
+
+
+    st.download_button(
+
+        label="📥 Download PowerPoint",
+
+        data=st.session_state.generated_ppt,
+
+        file_name=(
+            "SlideGuard_AI_Presentation.pptx"
+        ),
+
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation"
+        ),
+
+        use_container_width=True
+    )
+
+
+# =========================================================
+# FOOTER
+# =========================================================
+
+st.markdown("---")
+
+st.caption(
+    "🛡️ SlideGuard AI | Developed by Aliya Banu A"
+)
